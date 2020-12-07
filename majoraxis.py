@@ -51,7 +51,7 @@ class MajorMinorAxes(QgsProcessingAlgorithm):
         return 'majorminoraxes'
 
     def displayName(self):
-        return self.tr('Calculate major axes for Polygons')
+        return self.tr('Major Axis')
 
     def group(self):
         return self.tr('Glacier Tools')
@@ -60,7 +60,7 @@ class MajorMinorAxes(QgsProcessingAlgorithm):
         return 'glaciertools'
 
     def shortHelpString(self):
-        return self.tr("Create major axes for polygons")
+        return self.tr("Create major axis for polygons")
 
     def initAlgorithm(self, config=None):
         # Input Polygon Source

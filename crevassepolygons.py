@@ -22,17 +22,21 @@ from qgis.core import (QgsProcessing,
                        QgsProcessingParameterBoolean,
                        QgsProcessingParameterEnum,
                        QgsProcessingParameterFeatureSink,
+                       QgsProcessingParameterFeatureSource,
                        QgsProcessingOutputRasterLayer,
                        QgsProcessingOutputVectorLayer,
                        QgsProcessingParameterRasterDestination,
                        QgsProcessingParameterVectorDestination,
-                       QgsRasterLayer)
+                       QgsRasterLayer,
+                       QgsVectorLayer)
 from qgis import processing
 from scipy import ndimage
 import numpy as np
 import rasterio
+import rasterio.mask
 import time
 import gdal
+import json
 
 
 class CrevassePolygons(QgsProcessingAlgorithm):
@@ -49,6 +53,7 @@ class CrevassePolygons(QgsProcessingAlgorithm):
     INPUT = 'INPUT'
     OUTRASTER = 'OUTRASTER'
     OUTVECTOR = 'OUTVECTOR'
+    MASK = 'MASK'
     OUTPUT = 'OUTPUT'
     NEIGHBORHOOD = 'NEIGHBORHOOD'
     STAT = 'STAT'
@@ -68,7 +73,7 @@ class CrevassePolygons(QgsProcessingAlgorithm):
         return 'crevassepolygons'
 
     def displayName(self):
-        return self.tr('Create Crevasse Polygons')
+        return self.tr('Crevasse Polygons')
 
     def group(self):
         return self.tr('Glacier Tools')
@@ -89,34 +94,81 @@ class CrevassePolygons(QgsProcessingAlgorithm):
             )
         )
         
+        # Optional Polygon Mask
+        self.addParameter(
+            QgsProcessingParameterFeatureSource(
+                self.MASK,
+                self.tr('Polygon Mask'),
+                [QgsProcessing.TypeVectorPolygon],
+                optional=True
+            )
+        )
+        
         # Size of the neighborhood
-        self.addParameter(QgsProcessingParameterNumber(self.NEIGHBORHOOD,
-           self.tr('Neighborhood radius, the resulting neighborhood will be 2r + 1 by 2r + 1'),
-           type=QgsProcessingParameterNumber.Integer,
-           minValue=0, defaultValue=3, optional=False))
+        self.addParameter(
+            QgsProcessingParameterNumber(
+                self.NEIGHBORHOOD,
+               self.tr('Neighborhood radius, the resulting neighborhood will be 2r + 1 by 2r + 1'),
+               type=QgsProcessingParameterNumber.Integer,
+               minValue=0, 
+               defaultValue=3, 
+               optional=False
+            )
+        )
+        
+        # Use Circular Neighborhood?
+        self.addParameter(
+            QgsProcessingParameterBoolean(
+                self.CIRCULAR, 
+                self.tr('Use Circular Neighborhood'), 
+                defaultValue=False
+            )
+        )
            
         # Aggregate Type, mean or max
-        self.addParameter(QgsProcessingParameterEnum(self.STAT, self.tr('Aggregate Type'),['Mean','Max'],defaultValue='Mean',optional=False))
+        self.addParameter(
+            QgsProcessingParameterEnum(
+                self.STAT, 
+                self.tr('Aggregate Type'),
+                ['Mean','Max'],
+                defaultValue='Mean',
+                optional=False
+            )
+        )
         
         # Deviation Threshold
-        self.addParameter(QgsProcessingParameterNumber(self.DEVIATION,
-           self.tr('Deviation Threshold'),
-           type=QgsProcessingParameterNumber.Double,
-           minValue=0.0, defaultValue=5.0, optional=False))
-         
-        # Use Circular Neighborhood?
-        self.addParameter(QgsProcessingParameterBoolean(self.CIRCULAR, self.tr('Use Circular Neighborhood'), defaultValue=False))
+        self.addParameter(
+            QgsProcessingParameterNumber(
+                self.DEVIATION,
+                self.tr('Deviation Threshold'),
+                type=QgsProcessingParameterNumber.Double,
+                minValue=0.0, 
+                defaultValue=5.0, 
+                optional=False
+            )
+        )
         
         # Output Raster Location
-        self.addParameter(QgsProcessingParameterRasterDestination(self.OUTRASTER, self.tr('Output binary crevasse raster layer')))
+        self.addParameter(
+            QgsProcessingParameterRasterDestination(
+                self.OUTRASTER, 
+                self.tr('Output binary crevasse raster layer')
+            )
+        )
         
         # Output Vector Location
-        self.addParameter(QgsProcessingParameterVectorDestination(self.OUTVECTOR, self.tr('Output crevasse polygon layer')))
+        self.addParameter(
+            QgsProcessingParameterVectorDestination(
+                self.OUTVECTOR, 
+                self.tr('Output crevasse polygon layer')
+            )
+        )
         
         
     def processAlgorithm(self, parameters, context, feedback):
         
         # Grab our parameters from the user input
+        maskSource = self.parameterAsSource(parameters, self.MASK, context)
         circular = self.parameterAsBool(parameters, self.CIRCULAR, context)
         neighborhood = self.parameterAsInt(parameters, self.NEIGHBORHOOD, context)
         stat = self.parameterAsInt(parameters, self.STAT, context)
@@ -154,10 +206,21 @@ class CrevassePolygons(QgsProcessingAlgorithm):
         footprint = _create_footprint((2 * neighborhood + 1), circular)
         feedback.pushConsoleInfo(str(footprint))
         
-        
         # Process our DEM
         feedback.pushConsoleInfo(str("Opening DEM"))
         with rasterio.open(demUri) as dataset:
+            
+            demArray = dataset.read(1)
+            
+            # Mask out the DEM if a mask layer has been provided
+            if(maskSource):
+                features = maskSource.getFeatures()
+                for current, feature in enumerate(features):
+                    geom = feature.geometry()
+                    geojson = json.loads(geom.asJson())
+                    demArray, out_transform = rasterio.mask.mask(dataset, [geojson], crop=False, indexes=1, nodata=-9999)
+            
+            feedback.pushConsoleInfo(str(dataset.shape))
             w, h = dataset.shape
             cnt = w * h
             
@@ -189,7 +252,7 @@ class CrevassePolygons(QgsProcessingAlgorithm):
             
             feedback.pushConsoleInfo('outraster=' + str(outraster))
 
-            filtered = ndimage.generic_filter(dataset.read(1),
+            filtered = ndimage.generic_filter(demArray,
                        function=_filter_func,
                        footprint=footprint,
                        mode='nearest')
@@ -232,7 +295,7 @@ class CrevassePolygons(QgsProcessingAlgorithm):
                     'column': 'value',
                     'input': QgsRasterLayer(outraster),
                     'type': 2,
-                    'output': outvector
+                    'output': QgsProcessing.TEMPORARY_OUTPUT
                 }, 
                 context=context, 
                 feedback=feedback, 
@@ -247,15 +310,15 @@ class CrevassePolygons(QgsProcessingAlgorithm):
             
             outExtracted = processing.run(
                 "native:extractbyattribute", {
-                    'INPUT': outvector,
+                    'INPUT': polygons['output'],
                     'FIELD': "value",
                     'OPERATOR': 0,
                     'VALUE': '1',
                     'OUTPUT': outvector
                 },
-                is_child_algorithm=True,
-                context=context,
-                feedback=feedback
+                context=context, 
+                feedback=feedback, 
+                is_child_algorithm=True
             )
             
             feedback.pushConsoleInfo(str("Complete"))
